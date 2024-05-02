@@ -23,6 +23,15 @@ CLASS lhc_travel DEFINITION INHERITING FROM cl_abap_behavior_handler.
       IMPORTING keys FOR Travel~validateDates.
     METHODS deductDiscount FOR MODIFY
       IMPORTING keys FOR ACTION Travel~deductDiscount RESULT result.
+    METHODS copyTravel FOR MODIFY
+      IMPORTING keys FOR ACTION Travel~copyTravel.
+    METHODS acceptTravel FOR MODIFY
+      IMPORTING keys FOR ACTION Travel~acceptTravel RESULT result.
+
+    METHODS rejectTravel FOR MODIFY
+      IMPORTING keys FOR ACTION Travel~rejectTravel RESULT result.
+    METHODS get_instance_features FOR INSTANCE FEATURES
+      IMPORTING keys REQUEST requested_features FOR Travel RESULT result.
 ENDCLASS.
 
 CLASS lhc_travel IMPLEMENTATION.
@@ -261,7 +270,7 @@ CLASS lhc_travel IMPLEMENTATION.
 * Instance-bound non-factory action with parameter `deductDiscount`:
 * Deduct the specified discount from the booking fee (BookingFee)
 **************************************************************************
-    DATA travels_for_update TYPE TABLE FOR UPDATE ZR_RAP100_ATRAV655.
+    DATA travels_for_update TYPE TABLE FOR UPDATE zr_rap100_atrav655.
     DATA(keys_with_valid_discount) = keys.
 
     " check and handle invalid discount values
@@ -287,7 +296,7 @@ CLASS lhc_travel IMPLEMENTATION.
     CHECK keys_with_valid_discount IS NOT INITIAL.
 
     " read relevant travel instance data (only booking fee)
-    READ ENTITIES OF ZR_RAP100_ATRAV655 IN LOCAL MODE
+    READ ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
       ENTITY Travel
         FIELDS ( BookingFee )
         WITH CORRESPONDING #( keys_with_valid_discount )
@@ -305,13 +314,13 @@ CLASS lhc_travel IMPLEMENTATION.
     ENDLOOP.
 
     " update data with reduced fee
-    MODIFY ENTITIES OF ZR_RAP100_ATRAV655 IN LOCAL MODE
+    MODIFY ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
       ENTITY Travel
         UPDATE FIELDS ( BookingFee )
         WITH travels_for_update.
 
     " read changed data for action result
-    READ ENTITIES OF ZR_RAP100_ATRAV655 IN LOCAL MODE
+    READ ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
       ENTITY Travel
         ALL FIELDS WITH
         CORRESPONDING #( travels )
@@ -357,7 +366,141 @@ CLASS lhc_travel IMPLEMENTATION.
 *    " set action result
 *    result = VALUE #( FOR travel IN travels_with_discount ( %tky   = travel-%tky
 *                                                              %param = travel ) ).
-ENDMETHOD.
+  ENDMETHOD.
+
+
+**************************************************************************
+* Instance-bound factory action `copyTravel`:
+* Copy an existing travel instance
+**************************************************************************
+  METHOD copyTravel.
+    DATA:
+       travels       TYPE TABLE FOR CREATE zr_rap100_atrav655\\travel.
+
+    " remove travel instances with initial %cid (i.e., not set by caller API)
+    READ TABLE keys WITH KEY %cid = '' INTO DATA(key_with_inital_cid).
+    ASSERT key_with_inital_cid IS INITIAL.
+
+    " read the data from the travel instances to be copied
+    READ ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
+       ENTITY travel
+       ALL FIELDS WITH CORRESPONDING #( keys )
+    RESULT DATA(travel_read_result)
+    FAILED failed.
+
+    LOOP AT travel_read_result ASSIGNING FIELD-SYMBOL(<travel>).
+      " fill in travel container for creating new travel instance
+      APPEND VALUE #( %cid      = keys[ KEY entity %key = <travel>-%key ]-%cid
+                     %is_draft = keys[ KEY entity %key = <travel>-%key ]-%param-%is_draft
+                     %data     = CORRESPONDING #( <travel> EXCEPT TravelID )
+                  )
+      TO travels ASSIGNING FIELD-SYMBOL(<new_travel>).
+
+      " adjust the copied travel instance data
+      "" BeginDate must be on or after system date
+      <new_travel>-BeginDate     = cl_abap_context_info=>get_system_date( ).
+      "" EndDate must be after BeginDate
+      <new_travel>-EndDate       = cl_abap_context_info=>get_system_date( ) + 30.
+      "" OverallStatus of new instances must be set to open ('O')
+      <new_travel>-OverallStatus = travel_status-open.
+    ENDLOOP.
+
+    " create new BO instance
+    MODIFY ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
+       ENTITY travel
+       CREATE FIELDS ( AgencyID CustomerID BeginDate EndDate BookingFee
+                         TotalPrice CurrencyCode OverallStatus Description )
+          WITH travels
+       MAPPED DATA(mapped_create).
+
+    " set the new BO instances
+    mapped-travel   =  mapped_create-travel .
+  ENDMETHOD.
+
+
+*************************************************************************************
+* Instance-bound non-factory action: Set the overall travel status to 'A' (accepted)
+*************************************************************************************
+  METHOD acceptTravel.
+    " modify travel instance
+    MODIFY ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
+       ENTITY Travel
+       UPDATE FIELDS ( OverallStatus )
+       WITH VALUE #( FOR key IN keys ( %tky          = key-%tky
+                                        OverallStatus = travel_status-accepted ) )  " 'A'
+    FAILED failed
+    REPORTED reported.
+
+    " read changed data for action result
+    READ ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
+       ENTITY Travel
+       ALL FIELDS WITH
+       CORRESPONDING #( keys )
+       RESULT DATA(travels).
+
+    " set the action result parameter
+    result = VALUE #( FOR travel IN travels ( %tky   = travel-%tky
+                                             %param = travel ) ).
+  ENDMETHOD.
+
+
+*************************************************************************************
+* Instance-bound non-factory action: Set the overall travel status to 'X' (rejected)
+*************************************************************************************
+  METHOD rejectTravel.
+    " modify travel instance(s)
+    MODIFY ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
+       ENTITY Travel
+       UPDATE FIELDS ( OverallStatus )
+       WITH VALUE #( FOR key IN keys ( %tky          = key-%tky
+                                        OverallStatus = travel_status-rejected ) )  " 'X'
+    FAILED failed
+    REPORTED reported.
+
+    " read changed data for action result
+    READ ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
+       ENTITY Travel
+       ALL FIELDS WITH
+       CORRESPONDING #( keys )
+       RESULT DATA(travels).
+
+    " set the action result parameter
+    result = VALUE #( FOR travel IN travels ( %tky   = travel-%tky
+                                             %param = travel ) ).
+  ENDMETHOD.
+
+
+**************************************************************************
+* Instance-based dynamic feature control
+**************************************************************************
+  METHOD get_instance_features.
+    " read relevant travel instance data
+    READ ENTITIES OF zr_rap100_atrav655 IN LOCAL MODE
+      ENTITY travel
+        FIELDS ( TravelID OverallStatus )
+        WITH CORRESPONDING #( keys )
+      RESULT DATA(travels)
+      FAILED failed.
+
+    " evaluate the conditions, set the operation state, and set result parameter
+    result = VALUE #( FOR travel IN travels
+                      ( %tky                   = travel-%tky
+
+                        %features-%update      = COND #( WHEN travel-OverallStatus = travel_status-accepted
+                                                        THEN if_abap_behv=>fc-o-disabled ELSE if_abap_behv=>fc-o-enabled   )
+                        %features-%delete      = COND #( WHEN travel-OverallStatus = travel_status-open
+                                                        THEN if_abap_behv=>fc-o-enabled ELSE if_abap_behv=>fc-o-disabled   )
+                        %action-Edit           = COND #( WHEN travel-OverallStatus = travel_status-accepted
+                                                         THEN if_abap_behv=>fc-o-disabled ELSE if_abap_behv=>fc-o-enabled   )
+                        %action-acceptTravel   = COND #( WHEN travel-OverallStatus = travel_status-accepted
+                                                          THEN if_abap_behv=>fc-o-disabled ELSE if_abap_behv=>fc-o-enabled   )
+                        %action-rejectTravel   = COND #( WHEN travel-OverallStatus = travel_status-rejected
+                                                          THEN if_abap_behv=>fc-o-disabled ELSE if_abap_behv=>fc-o-enabled   )
+                        %action-deductDiscount = COND #( WHEN travel-OverallStatus = travel_status-open
+                                                          THEN if_abap_behv=>fc-o-enabled ELSE if_abap_behv=>fc-o-disabled   )
+                    ) ).
+
+  ENDMETHOD.
 
 
 ENDCLASS.
